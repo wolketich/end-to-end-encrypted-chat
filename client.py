@@ -1,50 +1,68 @@
 import socket
+import rsa
 from cryptography.fernet import Fernet
-from base64 import urlsafe_b64encode
+from hashlib import sha256
 
-from util import generate_key, format_key
+def generate_rsa_keys():
+    public_key, private_key = rsa.newkeys(2048)
+    print("Cheile RSA generate: Publică și Privată.")
+    return public_key, private_key
 
+def generate_fingerprint(data):
+    fingerprint = sha256(data).hexdigest()[:10]
+    print(f"Fingerprint generat pentru date: {fingerprint}")
+    return fingerprint
+
+def send_message(sock, data):
+    print(f"Se trimite mesaj de lungime: {len(data)} bytes")
+    sock.send(len(data).to_bytes(4, byteorder='big') + data)
+
+def receive_message(sock):
+    length = int.from_bytes(sock.recv(4), byteorder='big')
+    data = sock.recv(length)
+    print(f"Primit mesaj de lungime: {length} bytes")
+    return data
 
 def main():
-    host = input('Host to connect: ').strip()
-    port = int(input('Port to connect: ').strip())
+    host = input('Adresa host pentru conectare: ').strip()
+    port = int(input('Portul pentru conectare: ').strip())
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.connect((host, port))
+    print(f"Conexiune stabilită cu serverul la {host}:{port}")
 
-    common = generate_key()
-    secret = generate_key()
-    public = common + secret
+    public_key, private_key = generate_rsa_keys()
+    print("Cheia publică RSA client:", public_key.save_pkcs1('PEM').decode())
+    print("Cheia privată RSA client:", private_key.save_pkcs1('PEM').decode())
 
-    # sending common key to server
-    sock.send(str(common).encode())
+    public_key_pem = public_key.save_pkcs1('PEM')
+    send_message(sock, public_key_pem)
 
-    # getting public key from peer and sending own key
-    public_peer = int(sock.recv(1024).decode())
-    sock.send(str(public).encode())
+    server_public_key_pem = receive_message(sock)
+    server_public_key = rsa.PublicKey.load_pkcs1(server_public_key_pem)
+    print("Cheia publică RSA server recepționată și încărcată.")
 
-    message_secret = secret + public_peer
-    print(f'- Encrypt key is: {format_key(message_secret)}')
+    encrypted_key = receive_message(sock)
+    symmetric_key = rsa.decrypt(encrypted_key, private_key)
+    fernet = Fernet(symmetric_key)
+    print(f"Cheia simetrică Fernet decriptată și gata de utilizare: {symmetric_key.decode()}")
 
-    key_bytes = message_secret.to_bytes(32, byteorder='little')
-    fernet = Fernet(urlsafe_b64encode(key_bytes))
-
-    print('=' * 20)
+    fingerprint = generate_fingerprint(server_public_key_pem)
 
     try:
-        while True:        
-            message = input('message> ').strip()
-            encrypted_msg = fernet.encrypt(message.encode())
-            sock.send(encrypted_msg)
-            print('...')
+        while True:
+            message = input('Mesajul clientului> ')
+            encrypted_message = fernet.encrypt(message.encode())
+            print(f"Mesaj criptat trimis la server: {encrypted_message}")
+            send_message(sock, encrypted_message)
 
-            # wait response
-            response = sock.recv(1024)
-            response_decrypted = fernet.decrypt(response)
-            print(f'server> {response_decrypted.decode()}')
-    except KeyboardInterrupt:
-        print('Bye.')
+            server_response = receive_message(sock)
+            decrypted_response = fernet.decrypt(server_response)
+            print(f"Mesaj decriptat de la server: {decrypted_response.decode()}")
+    except Exception as e:
+        print(f"Eroare în timpul comunicării: {e}")
+    finally:
         sock.close()
 
-
-main()
+if __name__ == "__main__":
+    main()
